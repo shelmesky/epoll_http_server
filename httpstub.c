@@ -29,11 +29,12 @@
 #include <pthread.h>
 #include <errno.h>
 
-#define MAX_EPOLL_FD 4096
-#define MAX_BUF_SIZE (1<<20)
-#define WORKER_COUNT 2 
+#define MAX_EPOLL_FD 4096       // 最多监听4096个socket fd
+#define MAX_BUF_SIZE (1<<20)    // 1M大小的buffer
+#define WORKER_COUNT 2          // 调用epoll_create创建2个epoll fd
 
-int ep_fd[WORKER_COUNT],listen_fd;
+int ep_fd[WORKER_COUNT];        // socket fd数组, 4096个大小
+int listen_fd;                  // 监听fd
 int g_delay;
 int g_shutdown_flag;
 int g_quiet;
@@ -44,16 +45,17 @@ enum version_t {
         HTTP_1_0 = 10,
         HTTP_1_1 = 11
 };
+
 struct io_data_t {
-        int fd;
-        struct sockaddr_in addr;
-        char *in_buf;
-        char *out_buf;
-        int in_buf_cur;
-        int out_buf_cur;
-        int out_buf_total;
-        int keep_alive;
-        enum version_t version;
+        int fd;                         // client的socket fd
+        struct sockaddr_in addr;        // client的sockaddr_in结构
+        char *in_buf;                   // 读缓存
+        char *out_buf;                  // 写缓存
+        int in_buf_cur;                 // 读缓存游标
+        int out_buf_cur;                // 写缓存游标
+        int out_buf_total;              // 写缓存总的大小
+        int keep_alive;                 // 是否支持keep-alive
+        enum version_t version;         // 此次请求的HTTP版本
 };
 
 struct slice_t {
@@ -71,6 +73,7 @@ static void *handle_io_loop(void *param);
 
 static void httpstub_log(const char *fmt, ...);
 
+//设置socket fd为非阻塞
 static void setnonblocking(int fd)
 {
         int opts;
@@ -92,6 +95,8 @@ static void usage()
         printf("usage:  httpstub -p <port> -f <data file> -d <delay (ms)> [-q quiet] \n");
 }
 
+// 先判断文件是否存在，以及文件大小是否超过MAX_BUF_SIZE
+// 最后打开文件，读取文件内容并返回
 static struct slice_t load_data(char *fname)
 {
         struct stat buf;
@@ -127,20 +132,22 @@ static struct slice_t load_data(char *fname)
         return result;
 }
 
+//为每个连接初始化io_data_t结构
 static struct io_data_t * alloc_io_data(int client_fd, struct sockaddr_in *client_addr)
 {
         struct io_data_t *io_data_ptr = (struct io_data_t *)malloc(sizeof(struct io_data_t));
         io_data_ptr->fd = client_fd;
-        io_data_ptr->in_buf = (char *)malloc(4096);
-        io_data_ptr->out_buf = (char *)malloc(MAX_BUF_SIZE);
+        io_data_ptr->in_buf = (char *)malloc(4096);             // 申请4096字节的读缓存
+        io_data_ptr->out_buf = (char *)malloc(MAX_BUF_SIZE);    // 申请1M的写缓存
         io_data_ptr->in_buf_cur = 0;
         io_data_ptr->out_buf_cur = 0;
-        io_data_ptr->keep_alive = 1;
+        io_data_ptr->keep_alive = 1;    // 默认启用keep-alive
         if (client_addr)
                 io_data_ptr->addr = *client_addr;
         return io_data_ptr;
 }
 
+// 销毁io_data_t结构
 static void destroy_io_data(struct io_data_t *io_data_ptr)
 {
         if(NULL == io_data_ptr)return;
@@ -170,15 +177,15 @@ int main(int argc, char **argv)
         int worker_count=WORKER_COUNT,i;
         register int worker_pointer = 0;
 
-        struct sockaddr_in server_addr;
-        struct slice_t data_from_file;
+        struct sockaddr_in server_addr; // 服务端监听socket fd
+        struct slice_t data_from_file;  // 读取的文件
 
         pthread_t tid[WORKER_COUNT];
         pthread_attr_t tattr[WORKER_COUNT];
         struct thread_data_t tdata[WORKER_COUNT];
 
         char ip_buf[256] = { 0 };
-        struct sockaddr_in client_addr;
+        struct sockaddr_in client_addr; // client的sockaddr_in结构
         socklen_t client_n;
 
 
@@ -234,8 +241,10 @@ int main(int argc, char **argv)
                 exit(1);
         }
 
+        // 读取文件内容
         data_from_file = load_data(data_file);
 
+        // 注册信号
         signal(SIGPIPE, SIG_IGN);
         signal(SIGINT, exit_hook);
         signal(SIGKILL, exit_hook);
@@ -250,31 +259,38 @@ int main(int argc, char **argv)
                 }
         }
 
+        // listen_fd
         listen_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (-1 == listen_fd) {
                 perror("listen faild!");
                 exit(-1);
         }
 
+        // 为listen_fd设置socket属性
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
         setsockopt(listen_fd, IPPROTO_TCP, TCP_NODELAY, (int[]) {1}, sizeof(int));
         setsockopt(listen_fd, IPPROTO_TCP, TCP_QUICKACK, (int[]) {1}, sizeof(int));
 
+        // 初始化server_addr，设置IP和端口
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons((short)port_listening);
         server_addr.sin_addr.s_addr = inet_addr(ip_binding);
 
+        // bind
         if (-1 == bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr))) {
                 perror("bind error");
                 exit(-1);
         }
 
+        // listen
         if (-1 == listen(listen_fd, 32)) {
                 perror("listen error");
                 exit(-1);
         }
 
+        // 创建work_count个epoll instance
+        // 每个epoll instance监听4096个socket fd
         for(i=0;i<worker_count;i++){
                 ep_fd[i] = epoll_create(MAX_EPOLL_FD);
                 if(ep_fd[i]<0){
@@ -289,14 +305,17 @@ int main(int argc, char **argv)
                 tdata[i].data_from_file = data_from_file;
                 tdata[i].myep_fd = ep_fd[i];         
                 tdata[i].mypipe_fd = g_pipe[i][0];
+                //让handle_io_loop
                 if (pthread_create(tid+i, tattr+i, handle_io_loop, tdata+i ) != 0) {
                         fprintf(stderr, "pthread_create failed\n");
                         return -1;
                 }
-
         }
 
 
+        // 接受新连接
+        // 将client_fd写入到pipe
+        // handle_io_loop函数会从pipe读取
         while(1){
                 if ((client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_n)) > 0) {
                         if(write(g_pipe[worker_pointer][1],(char*)&client_fd,4)<0){
