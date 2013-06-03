@@ -33,7 +33,7 @@
 #define MAX_BUF_SIZE (1<<20)    // 1M大小的buffer
 #define WORKER_COUNT 2          // 调用epoll_create创建2个epoll fd
 
-int ep_fd[WORKER_COUNT];        // socket fd数组, 4096个大小
+int ep_fd[WORKER_COUNT];        // epoll fd数组, 2个大小
 int listen_fd;                  // 监听fd
 int g_delay;
 int g_shutdown_flag;
